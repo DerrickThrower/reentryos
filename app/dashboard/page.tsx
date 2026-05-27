@@ -373,9 +373,7 @@ function DashboardContent() {
                             
                             {/* Hardcoded 72-hour view for visual testing */}
                             <div className="pt-4 border-t border-[#1a1a1a]">
-                              <p className="text-[#6b7280] text-[12px] font-mono mb-8 uppercase tracking-widest">
-                                ↓ Mock View (Preview of generated plan layout) ↓
-                              </p>
+
                               <HardcodedTimeline />
                             </div>
                           </div>
