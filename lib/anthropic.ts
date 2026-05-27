@@ -365,135 +365,27 @@ const PLAN_RESPONSE_SCHEMA = {
   ]
 };
 
-async function generateWithGemini(userMessage: string): Promise<ServicePlanJSON> {
-  const apiKey = process.env.GEMINI_API_KEY;
-
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is not defined in the environment variables.');
-  }
-  const requestBody = {
-    contents: [
-      {
-        parts: [{ text: userMessage }],
-      },
-    ],
-    systemInstruction: {
-      parts: [{ text: SYSTEM_PROMPT }],
-    },
-    generationConfig: {
-      responseMimeType: 'application/json',
-      responseSchema: PLAN_RESPONSE_SCHEMA,
-      temperature: 0.2,
-    },
-  };
-
-  let response;
-  let errText = '';
-  const maxRetries = 3;
-
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    // Call Google Gemini API using gemini-3.5-flash
-    response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(requestBody),
-      }
-    );
-
-    if (response.ok) {
-      break;
-    }
-
-    errText = await response.text();
-
-    if (response.status === 429 && attempt < maxRetries) {
-      let waitTimeMs = 15000; // Default 15s wait
-      // Try to parse the exact retry time from the error message (e.g. "Please retry in 56.66s")
-      const match = errText.match(/retry in ([\d\.]+)s/);
-      if (match && match[1]) {
-        waitTimeMs = Math.ceil(parseFloat(match[1])) * 1000 + 1000; // Add 1s buffer
-      }
-      console.warn(`[Gemini API] 429 Rate Limit hit. Retrying attempt ${attempt}/${maxRetries} in ${waitTimeMs / 1000} seconds...`);
-      await new Promise((resolve) => setTimeout(resolve, waitTimeMs));
-      continue;
-    }
-
-    // Break on non-429 errors or if max retries reached
-    break;
-  }
-
-  if (!response || !response.ok) {
-    throw new Error(`Gemini API error (${response?.status || 'Unknown'}): ${errText}`);
-  }
-
-  const resJson = await response.json();
-  const rawText = resJson.candidates?.[0]?.content?.parts?.[0]?.text || '';
-
-  try {
-    return await parseAndValidate(rawText);
-  } catch (err) {
-    console.error('Failed to parse or validate initial Gemini response, retrying with strict prompt. Response was:', rawText);
-    console.error('Validation error details:', err);
-    
-    // Simple retry
-    const retryResponse = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          contents: [
-            {
-              parts: [{ text: userMessage }],
-            },
-            {
-              role: 'model',
-              parts: [{ text: rawText }]
-            },
-            {
-              role: 'user',
-              parts: [{ text: 'Return only valid raw JSON. Match the schema exactly. No explanation, no code blocks, just raw JSON.' }]
-            }
-          ],
-          systemInstruction: {
-            parts: [{ text: SYSTEM_PROMPT }],
-          },
-          generationConfig: {
-            responseMimeType: 'application/json',
-            responseSchema: PLAN_RESPONSE_SCHEMA,
-            temperature: 0.1,
-          },
-        }),
-      }
-    );
-
-    if (!retryResponse.ok) {
-      throw new Error(`Gemini API retry error: ${await retryResponse.text()}`);
-    }
-
-    const retryJson = await retryResponse.json();
-    const retryText = retryJson.candidates?.[0]?.content?.parts?.[0]?.text || '';
-    return await parseAndValidate(retryText);
-  }
-}
-
-async function generateWithOpenAI(userMessage: string): Promise<ServicePlanJSON> {
+export async function generateServicePlan(
+  clientData: IntakeFormData,
+  searchResults: SearchResults,
+  risk: RiskAssessment,
+  benefitsAnalysis: object,
+  housingRanking: object[]
+): Promise<ServicePlanJSON> {
+  const userMessage = buildPrompt(clientData, searchResults, risk, benefitsAnalysis, housingRanking);
   const apiKey = process.env.OPENAI_API_KEY;
 
   if (!apiKey) {
     throw new Error('OPENAI_API_KEY is not defined in the environment variables.');
   }
 
+  // Inject the expected schema directly into the system prompt for OpenAI structured output
+  const fullSystemPrompt = `${SYSTEM_PROMPT}\n\nYou MUST return a JSON object matching this exact schema:\n${JSON.stringify(PLAN_RESPONSE_SCHEMA, null, 2)}`;
+
   const requestBody = {
     model: 'gpt-4o',
     messages: [
-      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'system', content: fullSystemPrompt },
       { role: 'user', content: userMessage }
     ],
     response_format: { type: 'json_object' },
@@ -532,7 +424,7 @@ async function generateWithOpenAI(userMessage: string): Promise<ServicePlanJSON>
       body: JSON.stringify({
         model: 'gpt-4o',
         messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'system', content: fullSystemPrompt },
           { role: 'user', content: userMessage },
           { role: 'assistant', content: rawText },
           { role: 'user', content: 'Return only valid raw JSON. Match the schema exactly. No explanation, no code blocks, just raw JSON.' }
@@ -549,23 +441,5 @@ async function generateWithOpenAI(userMessage: string): Promise<ServicePlanJSON>
     const retryJson = await retryResponse.json();
     const retryText = retryJson.choices?.[0]?.message?.content || '';
     return await parseAndValidate(retryText);
-  }
-}
-
-export async function generateServicePlan(
-  clientData: IntakeFormData,
-  searchResults: SearchResults,
-  risk: RiskAssessment,
-  benefitsAnalysis: object,
-  housingRanking: object[]
-): Promise<ServicePlanJSON> {
-  const userMessage = buildPrompt(clientData, searchResults, risk, benefitsAnalysis, housingRanking);
-  
-  try {
-    console.log('[generateServicePlan] Attempting to generate plan using Gemini...');
-    return await generateWithGemini(userMessage);
-  } catch (error) {
-    console.warn('[generateServicePlan] Gemini failed or timed out. Falling back to OpenAI.', error);
-    return await generateWithOpenAI(userMessage);
   }
 }
