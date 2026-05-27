@@ -127,36 +127,57 @@ export async function POST(req: NextRequest) {
       const emitter = new AgentEmitter(controller, encoder);
 
       try {
-        const data: IntakeFormData = await req.json();
+        const data: IntakeFormData & { id?: string } = await req.json();
         const now = new Date();
 
         // ── Orchestrator: Start ────────────────────────────────────────────
         await emitter.emit('Orchestrator', 'working', `Initializing reentry coordination for ${data.name}...`);
 
-        // Save client to DB
-        const { data: client, error: clientError } = await supabaseServer
-          .from('clients')
-          .insert({
-            name: data.name,
-            release_date: data.release_date,
-            city: data.city,
-            state: data.state,
-            has_id: data.has_id,
-            housing_status: data.housing_status,
-            medical_conditions: data.medical_conditions || null,
-            prior_charges: data.prior_charges || null,
-            phone_number: data.phone_number || null,
-          })
-          .select()
-          .single();
+        let clientId = data.id;
 
-        if (clientError || !client) {
-          await emitter.emit('Orchestrator', 'error', `Failed to save client: ${clientError?.message}`);
-          emitter.close();
-          return;
+        if (!clientId) {
+          // Save client to DB
+          const { data: client, error: clientError } = await supabaseServer
+            .from('clients')
+            .insert({
+              name: data.name,
+              release_date: data.release_date,
+              city: data.city,
+              state: data.state,
+              has_id: data.has_id,
+              housing_status: data.housing_status,
+              medical_conditions: data.medical_conditions || null,
+              prior_charges: data.prior_charges || null,
+              phone_number: data.phone_number || null,
+            })
+            .select()
+            .single();
+
+          if (clientError || !client) {
+            await emitter.emit('Orchestrator', 'error', `Failed to save client: ${clientError?.message}`);
+            emitter.close();
+            return;
+          }
+
+          clientId = client.id as string;
+        } else {
+          // Update existing client record
+          await supabaseServer
+            .from('clients')
+            .update({
+              name: data.name,
+              release_date: data.release_date,
+              city: data.city,
+              state: data.state,
+              has_id: data.has_id,
+              housing_status: data.housing_status,
+              medical_conditions: data.medical_conditions || null,
+              prior_charges: data.prior_charges || null,
+              phone_number: data.phone_number || null,
+            })
+            .eq('id', clientId);
         }
 
-        const clientId = client.id as string;
         emitter.setClientId(clientId);
 
         await emitter.emit('Orchestrator', 'done', `Client profile loaded. Deploying 7 specialized agents.`, { client_id: clientId });

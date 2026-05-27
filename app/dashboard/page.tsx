@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useState, useCallback } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-import { ClientWithDetails } from '@/types';
+import { ClientWithDetails, IntakeFormData } from '@/types';
 import { ClientSidebar } from '@/components/ClientSidebar';
 import { RiskBadge } from '@/components/RiskBadge';
 import { PlanView } from '@/components/PlanView';
@@ -11,6 +11,7 @@ import { ScheduleTab } from '@/components/ScheduleTab';
 import { MessagesTab } from '@/components/MessagesTab';
 import { AgentLogsTab } from '@/components/AgentLogsTab';
 import { NotesTab } from '@/components/NotesTab';
+import { AgentFeed } from '@/components/AgentFeed';
 import { createBrowserClient } from '@/lib/supabase';
 
 function DashboardContent() {
@@ -25,10 +26,12 @@ function DashboardContent() {
   const [activeTab, setActiveTab] = useState<'PLAN' | 'SCHEDULE' | 'MESSAGES' | 'LOGS' | 'NOTES'>('PLAN');
   const [loadingList, setLoadingList] = useState(true);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  const [triggerIntakeData, setTriggerIntakeData] = useState<(IntakeFormData & { id?: string }) | null>(null);
 
   // Sync state with URL parameter
   useEffect(() => {
     setSelectedClientId(clientQueryId);
+    setTriggerIntakeData(null); // Cleanly hide overlay on client switch/redirect completion
   }, [clientQueryId]);
 
   // Fetch client list
@@ -345,12 +348,25 @@ function DashboardContent() {
                             <p className="font-mono text-[12px] tracking-widest text-[#6b7280] uppercase">
                               NO REENTRY PLAN GENERATED YET
                             </p>
-                            <Link
-                              href="/intake"
+                            <button
+                              onClick={() => {
+                                setTriggerIntakeData({
+                                  id: clientDetail.id,
+                                  name: clientDetail.name,
+                                  release_date: clientDetail.release_date,
+                                  city: clientDetail.city,
+                                  state: clientDetail.state,
+                                  phone_number: clientDetail.phone_number || '',
+                                  has_id: clientDetail.has_id,
+                                  housing_status: clientDetail.housing_status,
+                                  medical_conditions: clientDetail.medical_conditions || '',
+                                  prior_charges: clientDetail.prior_charges || '',
+                                });
+                              }}
                               className="inline-block font-mono text-[11px] tracking-widest px-4 py-2 border border-[#3b82f6] text-[#3b82f6] hover:bg-[#3b82f6]/10 transition-colors uppercase font-bold"
                             >
                               START INTAKE PIPELINE
-                            </Link>
+                            </button>
                           </div>
                         )}
                       </div>
@@ -395,6 +411,9 @@ function DashboardContent() {
           )}
         </div>
       </div>
+      {triggerIntakeData && (
+        <AgentFeed intakeData={triggerIntakeData} />
+      )}
     </div>
   );
 }
