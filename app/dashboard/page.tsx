@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { ClientWithDetails, IntakeFormData } from '@/types';
 import { ClientSidebar } from '@/components/ClientSidebar';
 import { RiskBadge } from '@/components/RiskBadge';
+import { HardcodedTimeline } from '@/components/HardcodedTimeline';
 import { PlanView } from '@/components/PlanView';
 import { ScheduleTab } from '@/components/ScheduleTab';
 import { MessagesTab } from '@/components/MessagesTab';
@@ -344,29 +345,39 @@ function DashboardContent() {
                             onPlanApproved={refetchClient}
                           />
                         ) : (
-                          <div className="border border-[#1a1a1a] bg-[#111111] p-12 text-center space-y-4">
-                            <p className="font-mono text-[12px] tracking-widest text-[#6b7280] uppercase">
-                              NO REENTRY PLAN GENERATED YET
-                            </p>
-                            <button
-                              onClick={() => {
-                                setTriggerIntakeData({
-                                  id: clientDetail.id,
-                                  name: clientDetail.name,
-                                  release_date: clientDetail.release_date,
-                                  city: clientDetail.city,
-                                  state: clientDetail.state,
-                                  phone_number: clientDetail.phone_number || '',
-                                  has_id: clientDetail.has_id,
-                                  housing_status: clientDetail.housing_status,
-                                  medical_conditions: clientDetail.medical_conditions || '',
-                                  prior_charges: clientDetail.prior_charges || '',
-                                });
-                              }}
-                              className="inline-block font-mono text-[11px] tracking-widest px-4 py-2 border border-[#3b82f6] text-[#3b82f6] hover:bg-[#3b82f6]/10 transition-colors uppercase font-bold"
-                            >
-                              START INTAKE PIPELINE
-                            </button>
+                          <div className="space-y-12">
+                            <div className="border border-[#1a1a1a] bg-[#111111] p-12 text-center space-y-4">
+                              <p className="font-mono text-[12px] tracking-widest text-[#6b7280] uppercase">
+                                NO REENTRY PLAN GENERATED YET
+                              </p>
+                              <button
+                                onClick={() => {
+                                  setTriggerIntakeData({
+                                    id: clientDetail.id,
+                                    name: clientDetail.name,
+                                    release_date: clientDetail.release_date,
+                                    city: clientDetail.city,
+                                    state: clientDetail.state,
+                                    phone_number: clientDetail.phone_number || '',
+                                    has_id: clientDetail.has_id,
+                                    housing_status: clientDetail.housing_status,
+                                    medical_conditions: clientDetail.medical_conditions || '',
+                                    prior_charges: clientDetail.prior_charges || '',
+                                  });
+                                }}
+                                className="inline-block font-mono text-[11px] tracking-widest px-4 py-2 border border-[#3b82f6] text-[#3b82f6] hover:bg-[#3b82f6]/10 transition-colors uppercase font-bold"
+                              >
+                                START INTAKE PIPELINE
+                              </button>
+                            </div>
+                            
+                            {/* Hardcoded 72-hour view for visual testing */}
+                            <div className="pt-4 border-t border-[#1a1a1a]">
+                              <p className="text-[#6b7280] text-[12px] font-mono mb-8 uppercase tracking-widest">
+                                ↓ Mock View (Preview of generated plan layout) ↓
+                              </p>
+                              <HardcodedTimeline />
+                            </div>
                           </div>
                         )}
                       </div>
