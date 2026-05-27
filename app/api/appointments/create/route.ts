@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabaseServer } from '@/lib/supabase';
+import { supabaseServer } from '@/lib/supabase-server';
 import { createEvent } from '@/lib/google-calendar';
 import { sendSMS } from '@/lib/twilio';
 

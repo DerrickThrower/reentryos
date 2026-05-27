@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server';
-import { supabaseServer } from '@/lib/supabase';
+import { supabaseServer } from '@/lib/supabase-server';
 import { AgentEmitter } from '@/lib/agents';
 import { searchResources } from '@/lib/tavily';
 import { generateServicePlan } from '@/lib/anthropic';

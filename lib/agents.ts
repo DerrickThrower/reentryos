@@ -1,4 +1,4 @@
-import { supabaseServer } from './supabase';
+import { supabaseServer } from './supabase-server';
 
 type AgentStatus = 'working' | 'done' | 'error';
 
