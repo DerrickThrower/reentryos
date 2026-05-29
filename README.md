@@ -104,6 +104,3 @@ We have included a seed pipeline script to simulate a client intake flow and ver
    - **SCHEDULE Tab**: Confirm Google Calendar appointments were created and synchronized.
    - **MESSAGES Tab**: Inspect automated messages queued to Twilio scheduler.
    - **AGENT LOGS Tab**: Click through individual agent filter chips ("HOUSING", "BENEFITS", "PLAN") to inspect pipeline telemetry logs and duration costs.
-
-### 🌟 The "Wow" Presentation Moment
-During your presentation, you can send a standard text message from a physical mobile phone to the purchased Twilio phone number. Because of the real-time webhook configuration, ReEntryOS will ingest the inbound text, notify the caseworker with a flagged alert on the dashboard, and stream it in the messages thread instantly—demonstrating real-time, interactive reentry coordination.
