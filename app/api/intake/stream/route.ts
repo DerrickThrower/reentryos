@@ -318,39 +318,43 @@ export async function POST(req: NextRequest) {
           },
         ];
 
-        for (const appt of appointmentsToCreate) {
-          try {
-            await emitter.emit('Calendar Agent', 'working', `Scheduling ${appt.title}...`);
-
-            let calResult = { eventId: '', eventLink: '' };
+        // Events are independent — create them concurrently instead of paying
+        // (Calendar API + DB insert) latency three times in sequence.
+        await Promise.all(
+          appointmentsToCreate.map(async (appt) => {
             try {
-              calResult = await createEvent(
-                appt.title,
-                appt.time,
-                appt.location,
-                appt.address,
-                appt.description
-              );
-            } catch (calErr) {
-              console.error('Google Calendar error:', calErr);
+              await emitter.emit('Calendar Agent', 'working', `Scheduling ${appt.title}...`);
+
+              let calResult = { eventId: '', eventLink: '' };
+              try {
+                calResult = await createEvent(
+                  appt.title,
+                  appt.time,
+                  appt.location,
+                  appt.address,
+                  appt.description
+                );
+              } catch (calErr) {
+                console.error('Google Calendar error:', calErr);
+              }
+
+              await supabaseServer.from('appointments').insert({
+                client_id: clientId,
+                title: appt.title,
+                location: appt.location,
+                address: appt.address,
+                scheduled_time: appt.time.toISOString(),
+                calendar_event_id: calResult.eventId || null,
+                calendar_event_link: calResult.eventLink || null,
+                sms_sent: false,
+              });
+
+              await emitter.emit('Calendar Agent', 'done', appt.logMsg);
+            } catch (err) {
+              await emitter.emit('Calendar Agent', 'error', `Calendar event failed: ${String(err)}. Saved locally.`);
             }
-
-            await supabaseServer.from('appointments').insert({
-              client_id: clientId,
-              title: appt.title,
-              location: appt.location,
-              address: appt.address,
-              scheduled_time: appt.time.toISOString(),
-              calendar_event_id: calResult.eventId || null,
-              calendar_event_link: calResult.eventLink || null,
-              sms_sent: false,
-            });
-
-            await emitter.emit('Calendar Agent', 'done', appt.logMsg);
-          } catch (err) {
-            await emitter.emit('Calendar Agent', 'error', `Calendar event failed: ${String(err)}. Saved locally.`);
-          }
-        }
+          })
+        );
 
         // ── SMS Agent ──────────────────────────────────────────────────────
         if (data.phone_number) {
@@ -405,23 +409,29 @@ export async function POST(req: NextRequest) {
               },
             ];
 
-            for (const msg of scheduledMessages) {
-              let sid = '';
-              try {
-                sid = await scheduleSMS(data.phone_number, msg.body, msg.sendAt);
-              } catch (schedErr) {
-                console.error('Scheduled SMS error:', schedErr);
-              }
+            // Schedule all follow-ups concurrently, then log them in one batched insert
+            // instead of a scheduleSMS + insert round-trip per message.
+            const sids = await Promise.all(
+              scheduledMessages.map(async (msg) => {
+                try {
+                  return await scheduleSMS(data.phone_number!, msg.body, msg.sendAt);
+                } catch (schedErr) {
+                  console.error('Scheduled SMS error:', schedErr);
+                  return '';
+                }
+              })
+            );
 
-              await supabaseServer.from('sms_log').insert({
+            await supabaseServer.from('sms_log').insert(
+              scheduledMessages.map((msg, i) => ({
                 client_id: clientId,
                 direction: 'outbound',
                 body: msg.body,
-                twilio_sid: sid || null,
+                twilio_sid: sids[i] || null,
                 scheduled_at: msg.sendAt.toISOString(),
                 flagged: false,
-              });
-            }
+              }))
+            );
 
             const nextMsg = scheduledMessages[0].sendAt;
             await emitter.emit(
@@ -461,11 +471,13 @@ export async function POST(req: NextRequest) {
           { client_id: clientId, plan_id: planId ?? undefined }
         );
 
+        await emitter.flush();
         emitter.close();
       } catch (fatalErr) {
         try {
           const errEmitter = new AgentEmitter(controller, encoder);
           await errEmitter.emit('Orchestrator', 'error', `Fatal pipeline error: ${String(fatalErr)}`);
+          await errEmitter.flush();
           errEmitter.close();
         } catch {
           controller.close();

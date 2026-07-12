@@ -7,6 +7,7 @@ export class AgentEmitter {
   private encoder: TextEncoder;
   private clientId: string | null = null;
   private agentStartTimes = new Map<string, number>();
+  private pendingLogs: Promise<unknown>[] = [];
 
   constructor(controller: ReadableStreamDefaultController, encoder: TextEncoder) {
     this.controller = controller;
@@ -47,18 +48,28 @@ export class AgentEmitter {
     }
 
     if (this.clientId) {
-      try {
-        await supabaseServer.from('agent_logs').insert({
+      // Fire-and-forget: don't block the pipeline on a DB round-trip per event.
+      // Writes are tracked so flush() can await them before the stream closes.
+      const write = Promise.resolve(
+        supabaseServer.from('agent_logs').insert({
           client_id: this.clientId,
           agent_name: agent,
           status,
           message,
           duration_ms,
-        });
-      } catch {
+        })
+      ).catch(() => {
         // Never let logging break the pipeline
-      }
+      });
+      this.pendingLogs.push(write);
     }
+  }
+
+  /** Await all in-flight log writes so none are dropped when the stream ends. */
+  async flush(): Promise<void> {
+    const pending = this.pendingLogs;
+    this.pendingLogs = [];
+    await Promise.allSettled(pending);
   }
 
   close(): void {

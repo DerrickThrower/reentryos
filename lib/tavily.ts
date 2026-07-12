@@ -29,7 +29,18 @@ async function tavilySearch(query: string): Promise<TavilyResult[]> {
   }
 }
 
+// Resource listings change slowly; cache per city/state so repeat intakes
+// on the same warm instance skip all 6 external searches.
+const CACHE_TTL_MS = 15 * 60 * 1000;
+const searchCache = new Map<string, { results: SearchResults; expiresAt: number }>();
+
 export async function searchResources(city: string, state: string): Promise<SearchResults> {
+  const cacheKey = `${city.trim().toLowerCase()}|${state.trim().toLowerCase()}`;
+  const cached = searchCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.results;
+  }
+
   const queries = [
     `${city} ${state} reentry homeless shelters transitional housing`,
     `${city} ${state} Medicaid SNAP benefits office enrollment location address phone`,
@@ -43,5 +54,12 @@ export async function searchResources(city: string, state: string): Promise<Sear
     queries.map((q) => tavilySearch(q))
   );
 
-  return { housing, benefits, clinics, employers, food_banks, dmv };
+  const results = { housing, benefits, clinics, employers, food_banks, dmv };
+
+  // Only cache useful responses — don't pin an outage or empty result set for 15 min.
+  if (Object.values(results).some((r) => r.length > 0)) {
+    searchCache.set(cacheKey, { results, expiresAt: Date.now() + CACHE_TTL_MS });
+  }
+
+  return results;
 }
