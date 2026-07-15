@@ -1,20 +1,29 @@
+import Anthropic from '@anthropic-ai/sdk';
+import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import { z } from 'zod';
 import { ServicePlanJSON, IntakeFormData, SearchResults, RiskAssessment } from '@/types';
+
+const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+const MODEL = 'claude-sonnet-5';
 
 const SYSTEM_PROMPT = `You are ReEntryOS, an AI coordination assistant for reentry case workers helping recently released individuals during their first 72 hours of freedom.
 
 Your job is to generate structured, actionable service plans grounded in real resources.
 
 Rules:
-- Always return valid JSON matching the schema provided. No preamble. No markdown fences. Raw JSON only.
 - Use web search results passed to you to reference REAL resources — real addresses, real phone numbers, real office hours
 - Never fabricate contact information
 - If uncertain about a resource flag it with verified: false
 - Prioritize by urgency: housing and medical before benefits before employment before legal
 - Be specific and direct — case workers are busy, no filler text
-- Every recommendation must have a concrete next action with a deadline`;
+- Every recommendation must have a concrete next action with a deadline
+- SMS message bodies must be at most 160 characters, brief, action-oriented, and reassuring`;
 
-// ─── Robust Zod Schemas ────────────────────────────────────────────────────────
+// ─── Zod Schemas ──────────────────────────────────────────────────────────────
+// These drive the API's structured-output enforcement (via zodOutputFormat) and
+// the client-side validation of the parsed response. Defaults keep the plan
+// renderable even when the model omits an optional field.
 
 const ResourceSchema = z.object({
   name: z.string(),
@@ -85,7 +94,7 @@ const NearbyResourcesSchema = z.object({
 });
 
 const ServicePlanSchema = z.object({
-  risk_score: z.number().min(0).max(100),
+  risk_score: z.number(),
   risk_level: z.enum(['critical', 'warning', 'stable']),
   risk_reasoning: z.string(),
   urgent_needs: z.array(UrgentNeedSchema).optional().default([]),
@@ -114,8 +123,8 @@ const ServicePlanSchema = z.object({
   caseworker_notes: z.string().optional().nullable().default('No custom notes generated.'),
   sms_messages: z.array(
     z.object({
-      send_at: z.string(),
-      body: z.string().max(160),
+      send_at: z.string().describe('ISO timestamp or relative time string to send the message'),
+      body: z.string().describe('SMS body, at most 160 characters'),
     })
   ).optional().default([]),
 });
@@ -146,224 +155,8 @@ ${JSON.stringify(housingRanking, null, 2)}
 LIVE SEARCH RESULTS (use real data from here — real addresses, phones, hours):
 ${JSON.stringify(searchResults, null, 2)}
 
-Return the complete service plan as raw JSON only. No markdown. No preamble. Match the exact schema. Use verified: false for any resource you cannot confirm from the search results above.`;
+Use verified: false for any resource you cannot confirm from the search results above.`;
 }
-
-async function parseAndValidate(text: string): Promise<ServicePlanJSON> {
-  const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-  let parsed = JSON.parse(cleaned);
-
-  // Robust nested object unwrapping (in case Gemini nests everything under a root key)
-  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-    const keys = Object.keys(parsed);
-    // If there is exactly one root key, and it maps to an object, and that object is not an array, unwrap it
-    if (keys.length === 1 && typeof parsed[keys[0]] === 'object' && parsed[keys[0]] !== null && !Array.isArray(parsed[keys[0]])) {
-      console.log(`Unwrapping nested JSON root key: ${keys[0]}`);
-      parsed = parsed[keys[0]];
-    }
-  }
-
-  // Defensive preprocessing to prevent Zod parsing validation failures
-  if (parsed && typeof parsed === 'object') {
-    // 1. Clamp risk score to [0, 100]
-    if (typeof parsed.risk_score === 'number') {
-      parsed.risk_score = Math.max(0, Math.min(100, parsed.risk_score));
-    } else if (parsed.risk_score !== undefined) {
-      parsed.risk_score = Math.max(0, Math.min(100, Number(parsed.risk_score) || 50));
-    } else {
-      parsed.risk_score = 50;
-    }
-
-    // 2. Validate and fallback for risk level
-    const validLevels = ['critical', 'warning', 'stable'];
-    if (!validLevels.includes(parsed.risk_level)) {
-      parsed.risk_level = 'stable';
-    }
-
-    // 3. Truncate SMS bodies to 160 characters max
-    if (Array.isArray(parsed.sms_messages)) {
-      parsed.sms_messages = parsed.sms_messages.map((msg: any) => {
-        if (msg && typeof msg === 'object') {
-          return {
-            ...msg,
-            body: typeof msg.body === 'string' ? msg.body.slice(0, 160) : '',
-          };
-        }
-        return msg;
-      });
-    }
-  }
-
-  return ServicePlanSchema.parse(parsed) as ServicePlanJSON;
-}
-
-const PLAN_RESPONSE_SCHEMA = {
-  type: "OBJECT",
-  properties: {
-    risk_score: { type: "INTEGER", description: "The pre-computed risk score (0-100)" },
-    risk_level: { type: "STRING", enum: ["critical", "warning", "stable"], description: "The risk level" },
-    risk_reasoning: { type: "STRING", description: "Reasoning for the risk level" },
-    urgent_needs: {
-      type: "ARRAY",
-      items: {
-        type: "OBJECT",
-        properties: {
-          priority: { type: "INTEGER" },
-          category: { type: "STRING", enum: ["housing", "medical", "benefits", "id", "employment", "legal"] },
-          action: { type: "STRING" },
-          why: { type: "STRING" },
-          deadline: { type: "STRING" },
-          resource: {
-            type: "OBJECT",
-            properties: {
-              name: { type: "STRING" },
-              address: { type: "STRING" },
-              phone: { type: "STRING" },
-              hours: { type: "STRING" },
-              verified: { type: "BOOLEAN" }
-            },
-            required: ["name"]
-          }
-        },
-        required: ["priority", "category", "action", "why", "resource"]
-      }
-    },
-    housing_options: {
-      type: "ARRAY",
-      items: {
-        type: "OBJECT",
-        properties: {
-          name: { type: "STRING" },
-          address: { type: "STRING" },
-          phone: { type: "STRING" },
-          type: { type: "STRING", enum: ["shelter", "transitional", "halfway", "emergency"] },
-          restrictions: { type: "STRING" },
-          medical_accessible: { type: "BOOLEAN" },
-          distance_miles: { type: "NUMBER" },
-          verified: { type: "BOOLEAN" }
-        },
-        required: ["name"]
-      }
-    },
-    benefits_eligibility: {
-      type: "ARRAY",
-      items: {
-        type: "OBJECT",
-        properties: {
-          program: { type: "STRING", enum: ["Medicaid", "SNAP", "SSI", "TANF", "GA"] },
-          likely_eligible: { type: "BOOLEAN" },
-          reasoning: { type: "STRING" },
-          next_step: { type: "STRING" },
-          deadline: { type: "STRING" },
-          office_address: { type: "STRING" },
-          office_phone: { type: "STRING" }
-        },
-        required: ["program"]
-      }
-    },
-    id_recovery: {
-      type: "OBJECT",
-      properties: {
-        steps: { type: "ARRAY", items: { type: "STRING" } },
-        required_documents: { type: "ARRAY", items: { type: "STRING" } },
-        nearest_dmv: { type: "STRING" },
-        nearest_dmv_address: { type: "STRING" },
-        nearest_vital_records: { type: "STRING" }
-      },
-      required: ["steps", "required_documents", "nearest_dmv"]
-    },
-    nearby_resources: {
-      type: "OBJECT",
-      properties: {
-        clinics: {
-          type: "ARRAY",
-          items: {
-            type: "OBJECT",
-            properties: {
-              name: { type: "STRING" },
-              address: { type: "STRING" },
-              phone: { type: "STRING" },
-              accepts_uninsured: { type: "BOOLEAN" }
-            },
-            required: ["name"]
-          }
-        },
-        food_banks: {
-          type: "ARRAY",
-          items: {
-            type: "OBJECT",
-            properties: {
-              name: { type: "STRING" },
-              address: { type: "STRING" },
-              hours: { type: "STRING" }
-            },
-            required: ["name"]
-          }
-        },
-        transit: {
-          type: "OBJECT",
-          properties: {
-            nearest_stop: { type: "STRING" },
-            day_pass_cost: { type: "STRING" }
-          },
-          required: ["nearest_stop", "day_pass_cost"]
-        }
-      },
-      required: ["clinics", "food_banks", "transit"]
-    },
-    appointments: {
-      type: "ARRAY",
-      items: {
-        type: "OBJECT",
-        properties: {
-          title: { type: "STRING" },
-          suggested_time: { type: "STRING" },
-          location: { type: "STRING" },
-          address: { type: "STRING" },
-          notes: { type: "STRING" }
-        },
-        required: ["title", "suggested_time"]
-      }
-    },
-    second_chance_employers: {
-      type: "ARRAY",
-      items: {
-        type: "OBJECT",
-        properties: {
-          name: { type: "STRING" },
-          address: { type: "STRING" },
-          phone: { type: "STRING" },
-          industry: { type: "STRING" },
-          verified: { type: "BOOLEAN" }
-        },
-        required: ["name"]
-      }
-    },
-    caseworker_notes: { type: "STRING" },
-    sms_messages: {
-      type: "ARRAY",
-      items: {
-        type: "OBJECT",
-        properties: {
-          send_at: { type: "STRING", description: "ISO timestamp or relative time string to send the message" },
-          body: {
-            type: "STRING",
-            maxLength: 160,
-            description: "SMS message text body. Must be at most 160 characters, brief, action-oriented, and reassuring."
-          }
-        },
-        required: ["send_at", "body"]
-      }
-    }
-  },
-  required: [
-    "risk_score",
-    "risk_level",
-    "risk_reasoning",
-    "id_recovery",
-    "nearby_resources"
-  ]
-};
 
 export async function generateServicePlan(
   clientData: IntakeFormData,
@@ -373,73 +166,31 @@ export async function generateServicePlan(
   housingRanking: object[]
 ): Promise<ServicePlanJSON> {
   const userMessage = buildPrompt(clientData, searchResults, risk, benefitsAnalysis, housingRanking);
-  const apiKey = process.env.OPENAI_API_KEY;
 
-  if (!apiKey) {
-    throw new Error('OPENAI_API_KEY is not defined in the environment variables.');
-  }
-
-  // Inject the expected schema directly into the system prompt for OpenAI structured output
-  const fullSystemPrompt = `${SYSTEM_PROMPT}\n\nYou MUST return a JSON object matching this exact schema:\n${JSON.stringify(PLAN_RESPONSE_SCHEMA, null, 2)}`;
-
-  const requestBody = {
-    model: 'gpt-4o',
-    messages: [
-      { role: 'system', content: fullSystemPrompt },
-      { role: 'user', content: userMessage }
-    ],
-    response_format: { type: 'json_object' },
-    temperature: 0.2,
-  };
-
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(requestBody),
+  // output_config.format constrains generation to the schema server-side, so
+  // the response is guaranteed parseable — no regex cleanup, no retry loop.
+  const response = await client.messages.parse({
+    model: MODEL,
+    max_tokens: 16000,
+    system: SYSTEM_PROMPT,
+    messages: [{ role: 'user', content: userMessage }],
+    output_config: { format: zodOutputFormat(ServicePlanSchema) },
   });
 
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`OpenAI API error (${response.status}): ${errText}`);
+  const plan = response.parsed_output;
+  if (!plan) {
+    throw new Error(
+      `Plan generation produced no parseable output (stop_reason: ${response.stop_reason})`
+    );
   }
 
-  const resJson = await response.json();
-  const rawText = resJson.choices?.[0]?.message?.content || '';
+  // Bounds the schema can't express server-side: clamp the score, keep SMS
+  // bodies within a single 160-char segment.
+  plan.risk_score = Math.max(0, Math.min(100, plan.risk_score));
+  plan.sms_messages = plan.sms_messages.map((msg) => ({
+    ...msg,
+    body: msg.body.slice(0, 160),
+  }));
 
-  try {
-    return await parseAndValidate(rawText);
-  } catch (err) {
-    console.error('Failed to parse or validate initial OpenAI response, retrying...', err);
-    
-    // Simple retry
-    const retryResponse = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: 'gpt-4o',
-        messages: [
-          { role: 'system', content: fullSystemPrompt },
-          { role: 'user', content: userMessage },
-          { role: 'assistant', content: rawText },
-          { role: 'user', content: 'Return only valid raw JSON. Match the schema exactly. No explanation, no code blocks, just raw JSON.' }
-        ],
-        response_format: { type: 'json_object' },
-        temperature: 0.1,
-      }),
-    });
-
-    if (!retryResponse.ok) {
-      throw new Error(`OpenAI API retry error: ${await retryResponse.text()}`);
-    }
-
-    const retryJson = await retryResponse.json();
-    const retryText = retryJson.choices?.[0]?.message?.content || '';
-    return await parseAndValidate(retryText);
-  }
+  return plan as ServicePlanJSON;
 }
