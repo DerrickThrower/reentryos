@@ -9,7 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.30.0",
+    "@anthropic-ai/sdk": "^0.111.0",
     "@radix-ui/react-dialog": "^1.0.5",
     "@radix-ui/react-label": "^2.1.0",
     "@radix-ui/react-select": "^2.1.0",
@@ -27,7 +27,7 @@
     "react-dom": "^18.3.0",
     "tailwind-merge": "^2.3.0",
     "twilio": "^5.3.0",
-    "zod": "^3.23.0"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/dotenv": "^6.1.1",
