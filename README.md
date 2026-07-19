@@ -71,6 +71,7 @@ Configure each required service to populate `.env.local`:
     https://<your-deployed-domain>/api/sms/webhook
     ```
   - Ensure the method is set to `POST`.
+  - Inbound requests are verified against `X-Twilio-Signature` using your `TWILIO_AUTH_TOKEN`. If your deployment sits behind a proxy that rewrites the `Host`/`X-Forwarded-*` headers, set `TWILIO_WEBHOOK_URL` to the exact public webhook URL so validation succeeds.
 
 ### 5. Google Calendar (OAuth2 Credentials)
 To allow the Calendar Agent to automatically book client appointments on your calendar:

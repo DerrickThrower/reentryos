@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseServer } from '@/lib/supabase-server';
-import { sendSMS } from '@/lib/twilio';
-import { buildTwiML } from '@/lib/twilio';
+import { sendSMS, buildTwiML, validateTwilioSignature } from '@/lib/twilio';
 import { triageInboundSMS } from '@/lib/sms-triage-agent';
 
 export const dynamic = 'force-dynamic';
@@ -9,8 +8,25 @@ export const dynamic = 'force-dynamic';
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
-    const from = formData.get('From') as string;
-    const body = (formData.get('Body') as string) || '';
+    const params: Record<string, string> = {};
+    formData.forEach((value, key) => {
+      if (typeof value === 'string') params[key] = value;
+    });
+
+    // Signature validation must cover the exact public URL Twilio requested;
+    // reconstruct it from proxy headers, or set TWILIO_WEBHOOK_URL to pin it.
+    const proto = req.headers.get('x-forwarded-proto') ?? req.nextUrl.protocol.replace(':', '');
+    const host = req.headers.get('x-forwarded-host') ?? req.headers.get('host') ?? req.nextUrl.host;
+    const webhookUrl = process.env.TWILIO_WEBHOOK_URL || `${proto}://${host}/api/sms/webhook`;
+    const signature = req.headers.get('x-twilio-signature') || '';
+
+    if (!validateTwilioSignature(signature, webhookUrl, params)) {
+      console.warn('Rejected inbound SMS webhook: invalid Twilio signature.');
+      return new NextResponse('Forbidden', { status: 403 });
+    }
+
+    const from = params['From'];
+    const body = params['Body'] || '';
     const upperBody = body.toUpperCase().trim();
 
     // Look up client by phone

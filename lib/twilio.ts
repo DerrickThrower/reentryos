@@ -37,6 +37,24 @@ export async function scheduleSMS(to: string, body: string, sendAt: Date): Promi
   return message.sid;
 }
 
+/**
+ * Validate an inbound webhook's X-Twilio-Signature. Returns true when
+ * TWILIO_AUTH_TOKEN is unset so the demo keeps working in simulated mode —
+ * any configured deployment gets real validation.
+ */
+export function validateTwilioSignature(
+  signature: string,
+  url: string,
+  params: Record<string, string>
+): boolean {
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  if (!authToken) {
+    console.warn('TWILIO_AUTH_TOKEN unset — skipping webhook signature validation (simulated mode).');
+    return true;
+  }
+  return twilio.validateRequest(authToken, signature, url, params);
+}
+
 export function buildTwiML(replyMessage?: string): string {
   if (replyMessage) {
     return `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${replyMessage}</Message></Response>`;

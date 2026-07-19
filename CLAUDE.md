@@ -76,6 +76,8 @@ Case worker (browser)
   └─ Documentation Agent: final `clients` risk update
 
 Client's phone ──inbound SMS──▶ Twilio ──POST form-encoded──▶ /api/sms/webhook
+  ├─ validate X-Twilio-Signature (403 on mismatch; skipped only when
+  │     TWILIO_AUTH_TOKEN is unset, i.e. simulated mode)
   ├─ look up client by phone_number, log to `sms_log` (direction='inbound')
   ├─ body contains "HELP" → flag message, force client risk to critical/95,
   │     auto-reply "caseworker notified"  ← deterministic safety net, runs FIRST
@@ -123,6 +125,7 @@ RLS is enabled on all tables, but policies just grant `authenticated` full acces
 | `SUPABASE_SERVICE_ROLE_KEY` | `lib/supabase-server.ts` — all API routes. High privilege; server-only. |
 | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` | `lib/twilio.ts` sendSMS |
 | `TWILIO_MESSAGING_SERVICE_SID` | scheduled SMS (Twilio enforces send-at ≥ ~15 min out; code clamps to now+16 min) |
+| `TWILIO_WEBHOOK_URL` | optional: pins the exact public URL used for webhook signature validation; otherwise reconstructed from `x-forwarded-proto`/`x-forwarded-host` |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` | `lib/google-calendar.ts` OAuth2 |
 | `GOOGLE_CALENDAR_TIMEZONE` | event timezone (default `America/Los_Angeles`) |
 
@@ -150,14 +153,13 @@ Twilio inbound requires configuring the phone number's "A message comes in" webh
 - **`HardcodedTimeline.tsx` is fake demo UI** — a static, hard-coded 72-hour timeline rendered on the dashboard's PLAN tab alongside the real `PlanView`. Don't mistake it for data-driven code.
 - Address/phone extraction from Tavily snippets is regex-based (`/\d+...(St|Ave|Blvd...)/`) and best-effort; expect junk values. The LLM prompt mitigates with `verified: false` flags.
 - `calculateRisk` always adds +10 "no income source" for every client; SMS bodies are truncated at 160 chars; HELP keyword forcibly sets risk_score to 95 — all intentional demo heuristics. The HELP keyword path is the deterministic safety net and must keep running before (and regardless of) LLM triage.
-- Inbound webhook does **no Twilio signature validation** — anyone who finds the URL can spoof inbound SMS, flip a client to critical, and (now) burn OpenAI/Tavily quota via the triage agent.
+- Inbound webhook signature validation is URL-sensitive: Twilio signs the exact public URL it POSTed to, and the route reconstructs it from `x-forwarded-proto`/`x-forwarded-host`. If a proxy/CDN rewrites those headers, set `TWILIO_WEBHOOK_URL` explicitly or every real webhook will 403. With `TWILIO_AUTH_TOKEN` unset (simulated mode) validation is skipped entirely — the webhook is unauthenticated in local demos.
 - Scheduled follow-up SMS times are computed from `release_date`/`now` and can drift from the Calendar events' times; the "5 messages scheduled" log message actually schedules 4.
 - `scratch/` is dead experimentation code; don't extend it, and don't take it as ground truth.
 - Client SMS consent/opt-out (STOP handling beyond Twilio defaults) is unhandled. TODO: confirm intended compliance approach before touching SMS flows.
 
 ## 10. Good first tasks if extending
 
-- Validate Twilio webhook signatures (`twilio.validateRequest`) in `/api/sms/webhook` — higher priority now that the webhook can trigger paid LLM calls.
 - Add real auth: gate `app/api/**` routes on a Supabase session instead of shipping the service-role key path unauthenticated.
 - Notify the case worker when triage marks a message urgent (today it only flags the row, same as HELP).
 - Use the Agents SDK's streamed run events for Plan Agent telemetry instead of the coarse `onToolEvent` hook (per-turn model/tool timing into `agent_logs`).
