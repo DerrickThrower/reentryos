@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server';
 import { supabaseServer } from '@/lib/supabase-server';
 import { AgentEmitter } from '@/lib/agents';
 import { searchResources } from '@/lib/tavily';
-import { generateServicePlan } from '@/lib/anthropic';
+import { generateServicePlan } from '@/lib/plan-agent';
 import { createEvent, nextBusinessDay, hoursFromNow } from '@/lib/google-calendar';
 import { sendSMS, scheduleSMS } from '@/lib/twilio';
 import { getSSEHeaders } from '@/lib/sse';
@@ -251,7 +251,9 @@ export async function POST(req: NextRequest) {
 
         try {
           await emitter.emit('Plan Agent', 'working', `Generating prioritized 72-hour service plan...`);
-          plan = await generateServicePlan(data, searchResults, risk, benefitsAnalysis, housingRanking);
+          plan = await generateServicePlan(data, searchResults, risk, benefitsAnalysis, housingRanking, {
+            onToolEvent: (message) => emitter.emit('Plan Agent', 'working', message),
+          });
 
           const { data: savedPlan } = await supabaseServer
             .from('service_plans')

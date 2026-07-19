@@ -43,9 +43,9 @@ Follow these numbered steps to configure ReEntryOS in your development environme
 
 Configure each required service to populate `.env.local`:
 
-### 1. Anthropic Claude API
-- **Endpoint**: [console.anthropic.com](https://console.anthropic.com/)
-- Sign in or create a developer profile, navigate to the API Keys section, and generate an API key. Add it to `ANTHROPIC_API_KEY`.
+### 1. OpenAI API
+- **Endpoint**: [platform.openai.com](https://platform.openai.com/)
+- Sign in or create a developer profile, navigate to the API Keys section, and generate an API key. Add it to `OPENAI_API_KEY`. This powers the Plan Agent (`gpt-4o`) and the inbound SMS Triage Agent (`gpt-4o-mini`), both built on the [OpenAI Agents SDK](https://openai.github.io/openai-agents-js/).
 
 ### 2. Tavily Search API
 - **Endpoint**: [tavily.com](https://tavily.com/)
@@ -71,6 +71,7 @@ Configure each required service to populate `.env.local`:
     https://<your-deployed-domain>/api/sms/webhook
     ```
   - Ensure the method is set to `POST`.
+  - Inbound requests are verified against `X-Twilio-Signature` using your `TWILIO_AUTH_TOKEN`. If your deployment sits behind a proxy that rewrites the `Host`/`X-Forwarded-*` headers, set `TWILIO_WEBHOOK_URL` to the exact public webhook URL so validation succeeds.
 
 ### 5. Google Calendar (OAuth2 Credentials)
 To allow the Calendar Agent to automatically book client appointments on your calendar:
