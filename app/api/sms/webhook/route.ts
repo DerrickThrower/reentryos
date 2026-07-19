@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { supabaseServer } from '@/lib/supabase-server';
 import { sendSMS } from '@/lib/twilio';
 import { buildTwiML } from '@/lib/twilio';
+import { triageInboundSMS } from '@/lib/sms-triage-agent';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,14 +24,18 @@ export async function POST(req: NextRequest) {
     const isFlagged = upperBody.includes('HELP');
     const isRide = upperBody.includes('RIDE');
 
-    await supabaseServer.from('sms_log').insert({
-      client_id: client?.id || null,
-      direction: 'inbound',
-      body,
-      twilio_sid: null,
-      scheduled_at: null,
-      flagged: isFlagged,
-    });
+    const { data: inboundLog } = await supabaseServer
+      .from('sms_log')
+      .insert({
+        client_id: client?.id || null,
+        direction: 'inbound',
+        body,
+        twilio_sid: null,
+        scheduled_at: null,
+        flagged: isFlagged,
+      })
+      .select('id')
+      .single();
 
     if (!client) {
       return new NextResponse(buildTwiML(), {
@@ -101,6 +106,49 @@ export async function POST(req: NextRequest) {
         });
       } catch (err) {
         console.error('RIDE auto-reply error:', err);
+      }
+
+      return new NextResponse(buildTwiML(), {
+        headers: { 'Content-Type': 'text/xml' },
+      });
+    }
+
+    // ── Agent triage for everything else ─────────────────────────────────────
+    // The HELP path above is the deterministic safety net and always runs first;
+    // triage only augments messages the keywords didn't catch. On any failure
+    // (no API key, timeout, bad output) triage returns null and behavior falls
+    // back to log-only, exactly as before.
+    const triage = await triageInboundSMS(
+      { name: client.name, city: client.city, state: client.state },
+      body
+    );
+
+    if (triage) {
+      if (triage.urgent) {
+        await supabaseServer
+          .from('clients')
+          .update({ risk_level: 'critical', risk_score: 95 })
+          .eq('id', client.id);
+
+        if (inboundLog?.id) {
+          await supabaseServer.from('sms_log').update({ flagged: true }).eq('id', inboundLog.id);
+        }
+      }
+
+      if (triage.reply) {
+        try {
+          const sid = await sendSMS(from, triage.reply);
+          await supabaseServer.from('sms_log').insert({
+            client_id: client.id,
+            direction: 'outbound',
+            body: triage.reply,
+            twilio_sid: sid,
+            scheduled_at: null,
+            flagged: false,
+          });
+        } catch (err) {
+          console.error('Triage auto-reply error:', err);
+        }
       }
     }
 

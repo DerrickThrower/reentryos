@@ -20,11 +20,11 @@ ReEntryOS is a Next.js web app that helps **reentry case workers** coordinate th
 - **Next.js 14.2.35** (App Router, `app/` directory) + **React 18.3.1**, **TypeScript 5.9.3** (`strict: true`), path alias `@/*` → repo root
 - **Tailwind CSS 3.4.19** + Radix UI primitives + `lucide-react` icons; dark, monospace "terminal" aesthetic
 - **Supabase** (`@supabase/supabase-js` 2.106.2) — Postgres datastore; service-role client on the server, anon client in the browser (auth only)
-- **LLM: OpenAI `gpt-4o`** via raw `fetch` to `api.openai.com/v1/chat/completions` (see §9 — not Anthropic, not Gemini, despite the file name and README)
-- **Tavily** search API via raw `fetch` (real-world resource lookup)
+- **LLM: OpenAI Agents SDK (`@openai/agents` 0.13.5)** — Plan Agent on `gpt-4o` with a Tavily search tool (`lib/plan-agent.ts`), SMS Triage Agent on `gpt-4o-mini` (`lib/sms-triage-agent.ts`); zod schemas as structured `outputType`
+- **Tavily** search API via raw `fetch` (real-world resource lookup; also exposed to both agents as a tool)
 - **Twilio 5.13.1** — outbound SMS, scheduled SMS (Messaging Service), inbound webhook
 - **googleapis 140.0.1** — Google Calendar v3 via OAuth2 refresh token
-- **zod 3.25.76** — validation of the LLM's plan JSON
+- **zod 4.4.3** — agent output schemas + plan normalization (v4 required by `@openai/agents`)
 - Hosting: `.gitignore` mentions `.vercel`, so Vercel is the likely target. TODO: confirm.
 - No test framework, no CI, no Prettier config. `npm run lint` (`next lint` / eslint-config-next) is the only check.
 
@@ -48,7 +48,7 @@ Database setup is manual: paste `migrations/001_initial_schema.sql` into the Sup
 
 ## 5. Architecture & data flow
 
-The "agents" are **not** autonomous LLM agents with tool-calling. The pipeline is a single hard-coded orchestration in `app/api/intake/stream/route.ts` (POST handler, SSE response, `maxDuration = 300`). Each "agent" is a named stage that emits progress events via `AgentEmitter` (`lib/agents.ts`), which both streams SSE to the browser and inserts rows into `agent_logs`. Exactly **one LLM call** happens (Plan Agent); risk scoring, benefits analysis, and housing ranking are plain deterministic TypeScript (keyword matching, regex extraction of addresses/phones from search snippets).
+The pipeline is a hard-coded orchestration in `app/api/intake/stream/route.ts` (POST handler, SSE response, `maxDuration = 300`). Each named stage emits progress events via `AgentEmitter` (`lib/agents.ts`), which both streams SSE to the browser and inserts rows into `agent_logs`. Two stages are **real LLM agents built on the OpenAI Agents SDK** (tool loop, structured output): the Plan Agent and the inbound SMS Triage Agent. Everything else is deliberately deterministic TypeScript — risk scoring, benefits analysis, and housing ranking are policy/safety decisions kept out of the LLM (keyword matching, regex extraction of addresses/phones from search snippets).
 
 ```
 Case worker (browser)
@@ -63,8 +63,11 @@ Case worker (browser)
   ├─ Benefits Agent: deterministic TS (analyzeBenefits)
   ├─ Housing Agent: deterministic TS (rankHousing)
   ├─ Risk Agent: deterministic TS (calculateRisk) → update `clients`
-  ├─ Plan Agent: lib/anthropic.ts generateServicePlan()
-  │     → OpenAI gpt-4o, JSON mode, zod-validated, 1 retry
+  ├─ Plan Agent: lib/plan-agent.ts generateServicePlan()
+  │     → Agents SDK on gpt-4o: baseline search results in prompt,
+  │       search_local_resources tool for follow-ups (maxTurns 8),
+  │       strict zod outputType, normalized + defaulted, 1 retry
+  │     → tool calls stream into AgentFeed via onToolEvent hook
   │     → insert `service_plans` + `tasks`
   ├─ Calendar Agent: lib/google-calendar.ts createEvent() ×3
   │     (Medicaid, DMV, 72h check-in) → insert `appointments`
@@ -75,8 +78,12 @@ Case worker (browser)
 Client's phone ──inbound SMS──▶ Twilio ──POST form-encoded──▶ /api/sms/webhook
   ├─ look up client by phone_number, log to `sms_log` (direction='inbound')
   ├─ body contains "HELP" → flag message, force client risk to critical/95,
-  │     auto-reply "caseworker notified"
+  │     auto-reply "caseworker notified"  ← deterministic safety net, runs FIRST
   ├─ body contains "RIDE" → live Tavily search for local transport, auto-reply
+  ├─ anything else (known client) → lib/sms-triage-agent.ts on gpt-4o-mini:
+  │     classifies urgency (→ flag + escalate risk) and may draft a ≤160-char
+  │     reply grounded in a Tavily tool call; returns null on ANY failure and
+  │     the webhook degrades to log-only (pre-agent behavior)
   └─ respond with TwiML (usually empty <Response/>)
 ```
 
@@ -110,9 +117,8 @@ RLS is enabled on all tables, but policies just grant `authenticated` full acces
 
 | Var | Used by |
 |---|---|
-| `OPENAI_API_KEY` | `lib/anthropic.ts` — the only LLM call. **Required** for plan generation. |
-| `ANTHROPIC_API_KEY` | **Unused in code.** Leftover in `.env.example`/README. |
-| `TAVILY_API_KEY` | `lib/tavily.ts`, `app/api/sms/webhook/route.ts` (RIDE lookup) |
+| `OPENAI_API_KEY` | `lib/plan-agent.ts` + `lib/sms-triage-agent.ts` (read implicitly by the Agents SDK). **Required** for plan generation; without it SMS triage silently no-ops. |
+| `TAVILY_API_KEY` | `lib/tavily.ts` (baseline searches + both agents' search tool), `app/api/sms/webhook/route.ts` (RIDE lookup) |
 | `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` | browser client (`lib/supabase.ts`, login page) |
 | `SUPABASE_SERVICE_ROLE_KEY` | `lib/supabase-server.ts` — all API routes. High privilege; server-only. |
 | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` | `lib/twilio.ts` sendSMS |
@@ -121,6 +127,8 @@ RLS is enabled on all tables, but policies just grant `authenticated` full acces
 | `GOOGLE_CALENDAR_TIMEZONE` | event timezone (default `America/Los_Angeles`) |
 
 Not in `.env.example` but referenced: `GEMINI_API_KEY` (scratch scripts only, dead). README also mentions `GOOGLE_CALENDAR_ID`, but the code hard-codes `calendarId: 'primary'`.
+
+Both agent modules call `setTracingDisabled(true)` at import time so run transcripts (which contain client PII) are never sent to the OpenAI traces dashboard. Do not re-enable tracing.
 
 Twilio inbound requires configuring the phone number's "A message comes in" webhook to `https://<deployed-domain>/api/sms/webhook` (POST) — see README.
 
@@ -135,23 +143,24 @@ Twilio inbound requires configuring the phone number's "A message comes in" webh
 
 ## 9. Known issues / gotchas
 
-- **`lib/anthropic.ts` calls OpenAI.** The file name, its comments ("in case Gemini nests…"), the `@anthropic-ai/sdk` dependency (never imported), `ANTHROPIC_API_KEY` in `.env.example`, and the README's Anthropic instructions are all remnants of provider churn (Gemini at the hackathon → Anthropic → OpenAI `gpt-4o`). Trust the code: the live path is OpenAI JSON-mode chat completions. The unused `PLAN_RESPONSE_SCHEMA` object still uses Gemini-style type casing (`"OBJECT"`, `"STRING"`) and is now just injected into the system prompt as text.
-- **README is stale** on the LLM provider and on `GOOGLE_CALENDAR_ID`; `OPENAI_API_KEY` is required but never mentioned there. (README also contains a `file:///Users/derrickthrower/...` local link.)
+- **Dual zod schemas in `lib/plan-agent.ts` are intentional.** The agent's `outputType` schema must stay strict-mode compatible (every field required-or-`.nullable()`; no `.optional()`, `.default()`, or min/max constraints — structured outputs reject them). Defaults, clamping, and 160-char SMS truncation are applied afterward by `normalizePlan` via the lenient schema, so stored `plan_json` keeps the pre-migration shape. Edit both schemas together.
+- The webhook now `await`s a `gpt-4o-mini` run (maxTurns 4) before returning TwiML; Twilio times out webhooks around 15s, so keep triage fast and never add heavier models or more turns there without moving it out of the request path. Triage failure of any kind returns `null` and degrades to log-only.
+- **README is stale** on `GOOGLE_CALENDAR_ID` and contains a `file:///Users/derrickthrower/...` local link. Provider-churn remnants (Gemini-era scripts) survive only in `scratch/`, which is excluded from `tsconfig.json` and not compiled.
 - **Auth is demo-only**: skip-login link, no session checks on any API route, service-role key everywhere. Any real deployment needs an auth layer before all `app/api` routes.
 - **`HardcodedTimeline.tsx` is fake demo UI** — a static, hard-coded 72-hour timeline rendered on the dashboard's PLAN tab alongside the real `PlanView`. Don't mistake it for data-driven code.
 - Address/phone extraction from Tavily snippets is regex-based (`/\d+...(St|Ave|Blvd...)/`) and best-effort; expect junk values. The LLM prompt mitigates with `verified: false` flags.
-- `calculateRisk` always adds +10 "no income source" for every client; SMS bodies are truncated at 160 chars; HELP keyword forcibly sets risk_score to 95 — all intentional demo heuristics.
-- Inbound webhook does **no Twilio signature validation** — anyone who finds the URL can spoof inbound SMS and flip a client to critical.
+- `calculateRisk` always adds +10 "no income source" for every client; SMS bodies are truncated at 160 chars; HELP keyword forcibly sets risk_score to 95 — all intentional demo heuristics. The HELP keyword path is the deterministic safety net and must keep running before (and regardless of) LLM triage.
+- Inbound webhook does **no Twilio signature validation** — anyone who finds the URL can spoof inbound SMS, flip a client to critical, and (now) burn OpenAI/Tavily quota via the triage agent.
 - Scheduled follow-up SMS times are computed from `release_date`/`now` and can drift from the Calendar events' times; the "5 messages scheduled" log message actually schedules 4.
 - `scratch/` is dead experimentation code; don't extend it, and don't take it as ground truth.
 - Client SMS consent/opt-out (STOP handling beyond Twilio defaults) is unhandled. TODO: confirm intended compliance approach before touching SMS flows.
 
 ## 10. Good first tasks if extending
 
-- Validate Twilio webhook signatures (`twilio.validateRequest`) in `/api/sms/webhook`.
-- Rename `lib/anthropic.ts` → `lib/llm.ts` (or similar), drop the unused `@anthropic-ai/sdk` dep, and fix `.env.example`/README to match the real provider.
+- Validate Twilio webhook signatures (`twilio.validateRequest`) in `/api/sms/webhook` — higher priority now that the webhook can trigger paid LLM calls.
 - Add real auth: gate `app/api/**` routes on a Supabase session instead of shipping the service-role key path unauthenticated.
+- Notify the case worker when triage marks a message urgent (today it only flags the row, same as HELP).
+- Use the Agents SDK's streamed run events for Plan Agent telemetry instead of the coarse `onToolEvent` hook (per-turn model/tool timing into `agent_logs`).
 - Replace `HardcodedTimeline` with a timeline rendered from `plan_json.urgent_needs` / `appointments`.
 - Use Supabase realtime (already enabled in the migration) to live-update the Messages tab and flagged-SMS alerts instead of refetch-on-click.
-- Notify the case worker (email/SMS) when a HELP message arrives — today it only flags the DB row and waits for someone to look at the dashboard.
-- Add a test harness (the deterministic pieces — `calculateRisk`, `analyzeBenefits`, `rankHousing`, `parseAndValidate` — are pure functions and easy to unit-test; they're currently unexported, so export them or test via the route).
+- Add a test harness (the deterministic pieces — `calculateRisk`, `analyzeBenefits`, `rankHousing`, `normalizePlan` — are pure functions and easy to unit-test; the first three are unexported, so export them or test via the route).

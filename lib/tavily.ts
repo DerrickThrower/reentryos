@@ -1,6 +1,6 @@
 import { TavilyResult, SearchResults } from '@/types';
 
-async function tavilySearch(query: string): Promise<TavilyResult[]> {
+export async function tavilySearch(query: string): Promise<TavilyResult[]> {
   try {
     const response = await fetch('https://api.tavily.com/search', {
       method: 'POST',
